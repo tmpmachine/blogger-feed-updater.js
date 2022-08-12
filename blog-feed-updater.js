@@ -1,0 +1,231 @@
+function BlogFeedUpdater(options) {
+  
+  let maxResults = 50;
+  let opt = {
+    onFeedReady: function() { },
+    onStateChange: onStateChange,
+    updateRange: [],
+  }
+  
+  let lang = {
+    updating: 'Checking for update ...',
+    upToDate: 'Song data is up to date',
+  };
+  
+  // apply user options
+  if (typeof(options) != 'undefined') {
+    for (let key in opt) {
+      if (typeof(options[key]) != 'undefined') {
+        opt[key] = options[key];
+      }
+    }
+    if (typeof(options.lang) != 'undefined') {
+      for (let key in lang) {
+        if (typeof(options.lang[key]) != 'undefined') {
+          lang[key] = options.lang[key];
+        }
+      }
+    }
+    if (typeof(options.maxResults) != 'undefined') {
+      maxResults = options.maxResults;
+    }
+  }
+  
+  let SELF = { 
+    
+  };
+  
+  let activeUpdaterIdx = -1;
+  let songs = [];
+    
+  let updateRange = opt.updateRange;
+  let checkUpdateCount = 0;
+  let updateQueue = [];
+  let updateQueueTmp = localStorage.getItem('update-queue');
+  if (updateQueueTmp !== null) {
+    updateQueue = JSON.parse(updateQueueTmp)
+  }
+  
+  syncUpdateRange();
+  
+  function syncUpdateRange() {
+    for (let queue of updateQueue) {
+      let range = updateRange.find(x => x.uid == queue.uid);
+      if (range !== undefined) {
+        queue.publishedMin = range.publishedMin;
+        queue.publishedMax = range.publishedMax;
+      }
+    }
+    saveQueue();
+  }
+  
+  function onStateChange() {
+    
+  }
+  
+  let states = {
+    checkingUpdate: 0,
+    updating: 1,
+    upToDate: 2,
+  };
+  
+  function fireState(stateCode, data) {
+    if (typeof(data) == 'undefined') {
+      data = {};
+    };
+    switch (stateCode) {
+      case states.checkingUpdate:
+        data.message = lang.updating;
+        break;
+      case states.upToDate:
+        data.message = lang.upToDate;
+        break;
+      case states.updating:
+        data.message = 'Updating data ' + data.current + '/' + data.total + ' ... (' +  data.currentBatch + '/' + data.totalBatch + ')';
+
+        break;
+    }
+    opt.onStateChange(stateCode, data);
+  }
+  
+  
+  function feedMe(url, callback) {
+    fetch(url)
+    .then(r=>r.json())
+    .then(r => {
+      callback(r);
+    });
+  }
+  
+  
+  function checkUpdateAt(range) {
+
+    let updater = updateQueue.find(x => x.uid == range.uid);
+    
+    if (updater === undefined) {
+      updater = {
+        uid: range.uid,
+        publishedMin: range.publishedMin,
+        publishedMax: range.publishedMax,
+        start: 1,
+        totalResults: 0,
+        updatedMax: null,
+        updatedMin: (new Date(0)).toISOString(),
+        updatedMinNew: null,
+      };
+      updateQueue.push(updater);
+      saveQueue();
+    }
+    
+    let url = `https://www.blogger.com/feeds/3000166519687388789/posts/summary/-/song?alt=json&max-results=0&orderby=updated&updated-min=${updater.updatedMin}&published-min=${updater.publishedMin}&published-max=${updater.publishedMax}&rnd=${Math.random()}`;
+
+    fetch(url)
+    .then(r => r.json())
+    .then(r => { 
+      let total = parseInt(r.feed.openSearch$totalResults.$t);
+      updater.totalResults = total;
+      updater.skip = (total === 0);
+      checkUpdateCount += 1;
+      if (checkUpdateCount == updateRange.length && updateQueue.length > 0) {
+        runUpdateQueue();
+      }
+      
+    });
+  }
+  
+  function removeUpdaterByUID(uid) {
+    let idx = -1;
+    for (let i=0; i<updateQueue.length; i++) {
+      if (updateQueue[i].uid == uid) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx >= 0) {
+      updateQueue.splice(idx,1);
+      saveQueue()
+    }
+  }
+  
+  function saveQueue() {
+    localStorage.setItem('update-queue', JSON.stringify(updateQueue));
+  }
+  
+  function runUpdateQueue() {
+    activeUpdaterIdx += 1;
+    if (activeUpdaterIdx < updateQueue.length) {
+      let updater = updateQueue[activeUpdaterIdx];
+      if (updater.skip) {
+        runUpdateQueue();
+      } else {
+        checkForUpdateCallback(updater, runUpdateQueue);
+      }
+    } else {
+      fireState(states.upToDate);
+    }
+  }
+  
+  function checkForUpdateCallback(updater, runNextUpdaterCallback) {
+    
+    let url = '';
+    
+    fireState(states.updating, {
+      current: Math.min((updater.start - 1) + maxResults, updater.totalResults),
+      total: updater.totalResults,
+      currentBatch: (activeUpdaterIdx+1),
+      totalBatch: updateQueue.length,
+    });
+    
+    if (updater.updatedMax === null) {
+      url = `https://www.blogger.com/feeds/3000166519687388789/posts/default/-/song?alt=json&max-results=${maxResults}&orderby=updated&updated-min=${updater.updatedMin}&published-min=${updater.publishedMin}&published-max=${updater.publishedMax}&rnd=${Math.random()}`;
+    } else {
+      url = `https://www.blogger.com/feeds/3000166519687388789/posts/default/-/song?alt=json&max-results=${maxResults}&orderby=updated&updated-min=${updater.updatedMin}&updated-max=${updater.updatedMax}&published-min=${updater.publishedMin}&published-max=${updater.publishedMax}&rnd=${Math.random()}`;
+    }
+    
+    feedMe(url, (feed) => {
+      let isNoResults = updaterCallback(feed, updater);
+      if (isNoResults) {
+        runNextUpdaterCallback();
+      } else {
+        checkForUpdateCallback(updater, runNextUpdaterCallback);  
+      }
+    });
+    
+  }
+  
+  function updaterCallback(r, updater) {
+    
+    let isNoResults = false;
+    if (r.feed.entry) {
+      try {
+        opt.onFeedReady(r.feed.entry);
+      } catch (e) { }
+      if (updater.updatedMinNew === null) {
+        updater.updatedMinNew = new Date(new Date(r.feed.entry[0].updated.$t).getTime()+1).toISOString();
+      }
+      let lastData = r.feed.entry[r.feed.entry.length-1];
+      updater.updatedMax = new Date(new Date(lastData.updated.$t).getTime()).toISOString();
+      updater.start += r.feed.entry.length;
+    } else {
+      updater.updatedMax = null;
+      if (updater.updatedMinNew != null) {
+        updater.updatedMin = updater.updatedMinNew;
+        updater.updatedMinNew = null;
+        updater.start = 1;
+      }
+      isNoResults = true;
+    }
+  
+    saveQueue();
+    return isNoResults;
+  }
+  
+  SELF.checkUpdate = function() {
+    fireState(states.checkingUpdate);
+    for (let range of updateRange) {
+      checkUpdateAt(range);
+    }
+  };
+  
+  return SELF;
+}
